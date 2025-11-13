@@ -24,3 +24,10 @@ momentum = 0.9
 log_every = 10
 eval_every = 40
 checkpoint_every = 80
+
+[schedule]
+# 可选：里程碑步数触发调整；默认不生效（列表为空）
+lr_milestones = []
+lr_gamma = 0.5
+temp_milestones = []
+temp_gamma = 0.9

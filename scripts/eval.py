@@ -77,13 +77,38 @@ def main():
     font_path = find_chinese_font()
     # 文本→向量缓存
     _cache = {}
+    cache_file = Path("data/processed/text_cache.jsonl")
+    # 载入持久化缓存
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        key = rec.get("key"); vec = rec.get("vec")
+                        if isinstance(key, str) and isinstance(vec, list) and len(vec) == 256:
+                            _cache[key] = vec
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     def text_to_vec(text: str):
-        v = _cache.get(text)
+        key = f"{text}|{font_path}|28|2|1|0"
+        v = _cache.get(key)
         if v is not None:
             return v
         bm = render_text_to_bitmap(text, font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
         vv = [(255 - x)/255.0 for row in bm for x in row]
-        _cache[text] = vv
+        _cache[key] = vv
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"key": key, "vec": vv}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
         return vv
 
     zh_embs = []

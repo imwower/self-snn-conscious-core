@@ -129,7 +129,15 @@ def main():
     mom = float(cfg["train"]["momentum"])  # noqa: F841
     log_every = int(cfg["train"]["log_every"])
     eval_every = int(cfg["train"]["eval_every"])
-    temp = float(cfg["loss"]["temperature"])  # noqa: F841
+    # 调度与初始温度/学习率
+    temp = float(cfg["loss"]["temperature"])  # 初始温度
+    base_lr = float(cfg["train"]["lr"])       # 初始学习率
+    current_lr = base_lr
+    schedule = cfg.get("schedule", {})
+    lr_milestones = list(schedule.get("lr_milestones", []))
+    lr_gamma = float(schedule.get("lr_gamma", 0.5)) if schedule.get("lr_milestones") else 1.0
+    temp_milestones = list(schedule.get("temp_milestones", []))
+    temp_gamma = float(schedule.get("temp_gamma", 0.9)) if schedule.get("temp_milestones") else 1.0
 
     bgen = batch_iter(train, batch_size)
 
@@ -144,6 +152,24 @@ def main():
 
     # 文本位图→向量 缓存，避免每步重复渲染/展平/归一化
     _text_vec_cache: Dict[str, List[float]] = {}
+    # 持久化缓存（JSONL）：data/processed/text_cache.jsonl
+    cache_file = Path("data/processed/text_cache.jsonl")
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        key = rec.get("key"); vec = rec.get("vec")
+                        if isinstance(key, str) and isinstance(vec, list) and len(vec) == 256:
+                            _text_vec_cache.setdefault(key, vec)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _gray_bitmap_to_vec(bm: List[List[int]]) -> List[float]:
         out: List[float] = []
@@ -154,12 +180,82 @@ def main():
 
     def text_to_vec_cached(text: str) -> List[float]:
         """将文本渲染为灰度位图并转成归一化后的 256 维向量，带内存缓存。"""
-        if text in _text_vec_cache:
-            return _text_vec_cache[text]
+        key = f"{text}|{font_path}|28|2|1|0"
+        if key in _text_vec_cache:
+            return _text_vec_cache[key]
         bm = render_text_to_bitmap(text, font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
         v = vec_reduce(_gray_bitmap_to_vec(bm))
-        _text_vec_cache[text] = v
+        _text_vec_cache[key] = v
+        # 追加写入持久化缓存
+        try:
+            ensure_dir(cache_file.parent)
+            with open(cache_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"key": key, "vec": v}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
         return v
+
+    def info_nce_sym_grads(A: List[List[float]], B: List[List[float]], temperature: float) -> (List[List[float]], List[List[float]], float):
+        """对称 InfoNCE 梯度近似（忽略归一化反传）：
+        - 返回对 zA 与 zB 的梯度，以及对称 InfoNCE 损失的标量值。
+        """
+        N = min(len(A), len(B))
+        if N == 0:
+            return [[0.0 for _ in range(len(A[0]) if A else 0)] for _ in range(0)], [[0.0 for _ in range(len(B[0]) if B else 0)] for _ in range(0)], 0.0
+        D = len(A[0])
+        # 相似度矩阵（已假设 A,B 为单位向量）
+        S = [[sum(A[i][k]*B[j][k] for k in range(D)) for j in range(N)] for i in range(N)]
+        # 行 softmax（A→B）
+        def softmax_row(z):
+            m = max(z)
+            ex = [math.exp((x/temperature) - (m/temperature)) for x in z]
+            s = sum(ex) + 1e-9
+            return [x/s for x in ex]
+        P_row = [softmax_row(S[i]) for i in range(N)]
+        # 列 softmax（B→A）
+        P_col = []
+        for j in range(N):
+            col = [S[i][j] for i in range(N)]
+            m = max(col)
+            ex = [math.exp((x/temperature) - (m/temperature)) for x in col]
+            s = sum(ex) + 1e-9
+            P_col.append([x/s for x in ex])  # 索引 [i]
+
+        gA = [[0.0 for _ in range(D)] for _ in range(N)]
+        gB = [[0.0 for _ in range(D)] for _ in range(N)]
+        # A→B 方向梯度
+        for i in range(N):
+            # dL/dzA_i = (Σ_j p_ij zB_j - zB_i)/T
+            tmp = [0.0 for _ in range(D)]
+            for j in range(N):
+                pij = P_row[i][j]
+                for k in range(D):
+                    tmp[k] += pij * B[j][k]
+                    gB[j][k] += pij * A[i][k] / max(1e-9, temperature)
+            for k in range(D):
+                gA[i][k] += (tmp[k] - B[i][k]) / max(1e-9, temperature)
+                gB[i][k] -= A[i][k] / max(1e-9, temperature)
+        # B→A 方向梯度
+        for j in range(N):
+            tmpB = [0.0 for _ in range(D)]
+            for i in range(N):
+                pji = P_col[j][i]
+                for k in range(D):
+                    tmpB[k] += pji * A[i][k]
+                    gA[i][k] += pji * B[j][k] / max(1e-9, temperature)
+            for k in range(D):
+                gB[j][k] += (tmpB[k] - A[j][k]) / max(1e-9, temperature)
+                gA[j][k] -= B[j][k] / max(1e-9, temperature)
+        # 对称损失 = (A→B + B→A)/2
+        def ce_row(ps):
+            return -math.log(ps + 1e-9)
+        loss_a2b = sum(ce_row(P_row[i][i]) for i in range(N)) / max(1, N)
+        loss_b2a = 0.0
+        for j in range(N):
+            loss_b2a += -math.log(P_col[j][j] + 1e-9)
+        loss_b2a /= max(1, N)
+        loss_sym = 0.5*(loss_a2b + loss_b2a)
+        return gA, gB, loss_sym
 
     step = 0
     for epoch in range(epochs):
@@ -179,7 +275,8 @@ def main():
             w_align = float(cfg["loss"]["align_weight"])  # noqa: F841
             w_agree = float(cfg["loss"]["agree_weight"])  # noqa: F841
             w_center = float(cfg["loss"]["center_weight"])  # noqa: F841
-            loss_align = info_nce_loss(z_zh, z_en, temperature=temp)
+            # 对称 InfoNCE 损失与梯度（完整负样本）
+            gZ_zh, gZ_en, loss_align = info_nce_sym_grads(z_zh, z_en, temperature=temp)
             loss_agree = sum(l2(a, b) for a, b in zip(z_zh, z_en)) / max(1, len(z_zh))
             center = [0.0 for _ in range(D)]
             for v in (z_zh + z_en):
@@ -188,27 +285,26 @@ def main():
             center = [x / max(1, len(z_zh) * 2) for x in center]
             loss_center = center_loss(z_zh + z_en, center)
 
-            # 简化：只对 zh<->is, en<->is 正样做梯度近似
-            def grad_cos(u: List[float], v: List[float]) -> List[float]:
-                c = cosine_sim(u, v)
-                return [vj - c * uj for uj, vj in zip(u, v)]
-
             G_zh = [[0.0 for _ in range(D)] for _ in range(in_text)]
             G_en = [[0.0 for _ in range(D)] for _ in range(in_text)]
-
             for i in range(len(batch)):
-                gz = grad_cos(z_zh[i], z_en[i])
-                ge = grad_cos(z_en[i], z_zh[i])
-                # x ⊗ dz
-                oz = outer(zh_vecs[i], gz)
-                oe = outer(en_vecs[i], ge)
+                oz = outer(zh_vecs[i], gZ_zh[i])
+                oe = outer(en_vecs[i], gZ_en[i])
                 for r in range(in_text):
                     for c in range(D):
                         G_zh[r][c] += oz[r][c]
                         G_en[r][c] += oe[r][c]
+            # 学习率调度：按步里程碑调整 current_lr
+            if step in lr_milestones and lr_gamma != 1.0:
+                current_lr *= lr_gamma
+                write_jsonl(logs, {"time": time.time(), "schedule": True, "lr": current_lr, "step": step})
+            # 温度调度：按步里程碑调整 temp
+            if step in temp_milestones and temp_gamma != 1.0:
+                temp *= temp_gamma
+                write_jsonl(logs, {"time": time.time(), "schedule": True, "temperature": temp, "step": step})
 
-            apply_update(W_zh, G_zh, lr=float(cfg["train"]["lr"]), mom=float(cfg["train"]["momentum"]), V=V_zh)
-            apply_update(W_en, G_en, lr=float(cfg["train"]["lr"]), mom=float(cfg["train"]["momentum"]), V=V_en)
+            apply_update(W_zh, G_zh, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V_zh)
+            apply_update(W_en, G_en, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V_en)
 
             step += 1
             if step % log_every == 0:
@@ -220,7 +316,9 @@ def main():
                     "loss_align": float(loss_align),
                     "loss_agree": float(loss_agree),
                     "loss_center": float(loss_center),
-                    "rates": 0.0
+                    "rates": 0.0,
+                    "lr": current_lr,
+                    "temperature": temp
                 })
                 logger.info(f"step={step} loss={loss_align + loss_agree + loss_center:.4f} align={loss_align:.4f}")
 
