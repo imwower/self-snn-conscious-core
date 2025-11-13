@@ -1,0 +1,19 @@
+# Byte-compiled / cache
+__pycache__/
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Training runs and logs
+runs/
+.last_run
+
+# Generated datasets and images
+data/raw/
+data/processed/
+
+# Virtual envs (if any)
+.venv/
+venv/
+
