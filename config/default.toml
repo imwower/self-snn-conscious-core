@@ -33,6 +33,11 @@ lr_milestones = []
 lr_gamma = 0.5
 temp_milestones = []
 temp_gamma = 0.9
+# 余弦退火：若开启则优先于里程碑调度
+cosine_lr = false
+lr_min = 0.005
+cosine_temp = false
+temp_min = 0.05
 
 [augment]
 enable = false

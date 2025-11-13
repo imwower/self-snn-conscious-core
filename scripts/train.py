@@ -95,6 +95,13 @@ def main():
 
     logger = get_logger("train")
     logger.info(f"run_dir={run_dir}")
+    # 记录最后一次运行指针到 runs/.last_run（写入完整相对路径 runs/<ts>）
+    try:
+        ensure_dir(Path("runs"))
+        with open(Path("runs") / ".last_run", "w", encoding="utf-8") as f:
+            f.write(str(run_dir) + "\n")
+    except Exception:
+        pass
 
     # 数据
     train = load_triples(Path(cfg["data"]["train"]))
@@ -146,14 +153,20 @@ def main():
     log_every = int(cfg["train"]["log_every"])
     eval_every = int(cfg["train"]["eval_every"])
     # 调度与初始温度/学习率
-    temp = float(cfg["loss"]["temperature"])  # 初始温度
+    temp0 = float(cfg["loss"]["temperature"])  # 初始温度
     base_lr = float(cfg["train"]["lr"])       # 初始学习率
     current_lr = base_lr
     schedule = cfg.get("schedule", {})
+    # 里程碑调度
     lr_milestones = list(schedule.get("lr_milestones", []))
     lr_gamma = float(schedule.get("lr_gamma", 0.5)) if schedule.get("lr_milestones") else 1.0
     temp_milestones = list(schedule.get("temp_milestones", []))
     temp_gamma = float(schedule.get("temp_gamma", 0.9)) if schedule.get("temp_milestones") else 1.0
+    # 余弦退火（优先级高于里程碑）
+    cosine_lr = bool(schedule.get("cosine_lr", False))
+    lr_min = float(schedule.get("lr_min", max(1e-5, base_lr * 0.1)))
+    cosine_temp = bool(schedule.get("cosine_temp", False))
+    temp_min = float(schedule.get("temp_min", max(1e-3, temp0 * 0.8)))
 
     bgen = batch_iter(train, batch_size)
 
@@ -331,8 +344,18 @@ def main():
         return gA, gB, loss_sym
 
     step = 0
+    total_steps = epochs * steps_per_epoch
     for epoch in range(epochs):
         for _ in range(steps_per_epoch):
+            # 计算当步调度值
+            if cosine_lr:
+                phi = (step % max(1, total_steps)) / max(1, total_steps)
+                current_lr = lr_min + 0.5 * (base_lr - lr_min) * (1.0 + math.cos(math.pi * phi))
+            if cosine_temp:
+                phi = (step % max(1, total_steps)) / max(1, total_steps)
+                curr_temp = temp_min + 0.5 * (temp0 - temp_min) * (1.0 + math.cos(math.pi * phi))
+            else:
+                curr_temp = temp0
             batch = next(bgen)
             # 增广参数
             aug = cfg.get("augment", {})
@@ -396,7 +419,7 @@ def main():
             w_agree = float(cfg["loss"]["agree_weight"])  # noqa: F841
             w_center = float(cfg["loss"]["center_weight"])  # noqa: F841
             # 对称 InfoNCE 损失与梯度（完整负样本）
-            gZ_zh, gZ_en, loss_align = info_nce_sym_grads(z_zh, z_en, temperature=temp)
+            gZ_zh, gZ_en, loss_align = info_nce_sym_grads(z_zh, z_en, temperature=curr_temp)
             loss_agree = sum(l2(a, b) for a, b in zip(z_zh, z_en)) / max(1, len(z_zh))
             center = [0.0 for _ in range(D)]
             for v in (z_zh + z_en):
@@ -434,12 +457,13 @@ def main():
                             G1_zh[r][c] += oz1[r][c]
                             G1_en[r][c] += oe1[r][c]
                 # 应用更新
-                if step in lr_milestones and lr_gamma != 1.0:
+                if (not cosine_lr) and step in lr_milestones and lr_gamma != 1.0:
                     current_lr *= lr_gamma
                     write_jsonl(logs, {"time": time.time(), "schedule": True, "lr": current_lr, "step": step})
-                if step in temp_milestones and temp_gamma != 1.0:
-                    temp *= temp_gamma
-                    write_jsonl(logs, {"time": time.time(), "schedule": True, "temperature": temp, "step": step})
+                if (not cosine_temp) and step in temp_milestones and temp_gamma != 1.0:
+                    temp0 *= temp_gamma
+                    curr_temp = temp0
+                    write_jsonl(logs, {"time": time.time(), "schedule": True, "temperature": curr_temp, "step": step})
                 apply_update(W1_zh, G1_zh, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V1_zh)
                 apply_update(W2_zh, G2_zh, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V2_zh)
                 apply_update(W1_en, G1_en, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V1_en)
@@ -452,12 +476,13 @@ def main():
                         for c in range(D):
                             G_zh[r][c] += oz[r][c]
                             G_en[r][c] += oe[r][c]
-                if step in lr_milestones and lr_gamma != 1.0:
+                if (not cosine_lr) and step in lr_milestones and lr_gamma != 1.0:
                     current_lr *= lr_gamma
                     write_jsonl(logs, {"time": time.time(), "schedule": True, "lr": current_lr, "step": step})
-                if step in temp_milestones and temp_gamma != 1.0:
-                    temp *= temp_gamma
-                    write_jsonl(logs, {"time": time.time(), "schedule": True, "temperature": temp, "step": step})
+                if (not cosine_temp) and step in temp_milestones and temp_gamma != 1.0:
+                    temp0 *= temp_gamma
+                    curr_temp = temp0
+                    write_jsonl(logs, {"time": time.time(), "schedule": True, "temperature": curr_temp, "step": step})
                 apply_update(W_zh, G_zh, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V_zh)
                 apply_update(W_en, G_en, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V_en)
             # 非 MLP 分支的更新已在上方完成；此处移除重复更新
@@ -494,7 +519,7 @@ def main():
                     "loss_center": float(loss_center),
                     "rates": 0.0,
                     "lr": current_lr,
-                    "temperature": temp,
+                    "temperature": curr_temp,
                     "pos_mean_zh2en": pos1,
                     "hardneg_mean_zh2en": hard1,
                     "pos_mean_en2zh": pos2,

@@ -13,9 +13,10 @@
 ```bash
 python -m pip install -r requirements.txt
 python scripts/build_dataset.py --out data/processed --concepts examples/concepts_small.jsonl --pairs_per_concept 3
-TS=$(date +"%Y-%m-%d_%H-%M-%S"); echo $TS > .last_run
+TS=$(date +"%Y-%m-%d_%H-%M-%S")
 python scripts/train.py --config config/default.toml --run runs/$TS
-python scripts/eval.py --run runs/$TS --config config/default.toml
+# 训练脚本会将最近一次运行路径写入 runs/.last_run
+python scripts/eval.py --run $(cat runs/.last_run) --config config/default.toml
 ```
 
 产物：
@@ -85,8 +86,8 @@ checkpoint_every = 80
 
 1) 依赖安装：`pip install -r requirements.txt`（仅 Pillow）
 2) 构建数据：`python scripts/build_dataset.py --out data/processed --concepts examples/concepts_small.jsonl --pairs_per_concept 3`
-3) 训练：`TS=$(date +"%Y-%m-%d_%H-%M-%S"); echo $TS > .last_run; python scripts/train.py --config config/default.toml --run runs/$TS`
-4) 评测：`python scripts/eval.py --run runs/$TS --config config/default.toml`
+3) 训练：`TS=$(date +"%Y-%m-%d_%H-%M-%S"); python scripts/train.py --config config/default.toml --run runs/$TS`
+4) 评测：`python scripts/eval.py --run $(cat runs/.last_run) --config config/default.toml`
 
 ## 设计要点（简述）
 
@@ -111,4 +112,3 @@ feat(scripts): build/train/eval 最小闭环与JSONL日志
 docs: 简化 README，聚焦快速开始与配置
 chore: .gitignore 忽略 runs/ 与 data/
 ```
-

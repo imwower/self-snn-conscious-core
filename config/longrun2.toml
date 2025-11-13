@@ -32,6 +32,10 @@ lr_milestones = [200, 400]
 lr_gamma = 0.7
 temp_milestones = [200, 400]
 temp_gamma = 0.95
+cosine_lr = true
+lr_min = 0.008
+cosine_temp = true
+temp_min = 0.05
 
 [augment]
 enable = true
