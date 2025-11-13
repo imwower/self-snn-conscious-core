@@ -18,7 +18,13 @@ import pickle
 import random
 import time
 from pathlib import Path
+import sys
 from typing import List, Dict
+
+ # 兼容直接以 `python scripts/train.py` 运行：把仓库根目录加入 sys.path（导入 self_core）
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from self_core.utils.io import get_logger, new_run_dir, read_config, write_jsonl, ensure_dir
 from self_core.encoding.system_font import render_text_to_bitmap, find_chinese_font

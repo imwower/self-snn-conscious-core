@@ -12,6 +12,12 @@ import argparse
 import json
 import random
 from pathlib import Path
+import sys, os
+
+# 兼容直接以 `python scripts/xxx.py` 运行：把仓库根目录加入 sys.path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from typing import List, Dict
 
 from self_core.utils.io import ensure_dir, write_jsonl, get_logger, new_run_dir
