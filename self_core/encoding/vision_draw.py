@@ -87,6 +87,30 @@ def draw_ellipse(img: List[List[List[int]]], cx: int, cy: int, rx: int, ry: int,
                 img[y][x] = [color[0], color[1], color[2]]
 
 
+def draw_line(img: List[List[List[int]]], x1: int, y1: int, x2: int, y2: int, color=(0, 0, 0)):
+    """Bresenham 直线。"""
+    h = len(img)
+    w = len(img[0]) if h else 0
+    dx = abs(x2 - x1)
+    dy = -abs(y2 - y1)
+    sx = 1 if x1 < x2 else -1
+    sy = 1 if y1 < y2 else -1
+    err = dx + dy
+    x, y = x1, y1
+    while True:
+        if 0 <= y < h and 0 <= x < w:
+            img[y][x] = [color[0], color[1], color[2]]
+        if x == x2 and y == y2:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x += sx
+        if e2 <= dx:
+            err += dx
+            y += sy
+
+
 def add_noise_rgb(img: List[List[List[int]]], amount: float = 0.02):
     h = len(img)
     w = len(img[0]) if h else 0
