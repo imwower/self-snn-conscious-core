@@ -1,0 +1,15 @@
+{"id":"apple","zh":["苹果"],"en":["apple"],"attrs":["red","green"]}
+{"id":"banana","zh":["香蕉"],"en":["banana"],"attrs":["yellow"]}
+{"id":"cat","zh":["猫"],"en":["cat"],"attrs":["small"]}
+{"id":"dog","zh":["狗"],"en":["dog"],"attrs":["small"]}
+{"id":"car","zh":["车"],"en":["car"],"attrs":["red"]}
+{"id":"tree","zh":["树"],"en":["tree"],"attrs":["green"]}
+{"id":"bird","zh":["鸟"],"en":["bird"],"attrs":["blue"]}
+{"id":"fish","zh":["鱼"],"en":["fish"],"attrs":["blue"]}
+{"id":"house","zh":["房子"],"en":["house"],"attrs":["white"]}
+{"id":"book","zh":["书"],"en":["book"],"attrs":["paper"]}
+{"id":"cup","zh":["杯"],"en":["cup"],"attrs":["water"]}
+{"id":"phone","zh":["电话"],"en":["phone"],"attrs":["black"]}
+{"id":"chair","zh":["椅"],"en":["chair"],"attrs":["wood"]}
+{"id":"table","zh":["桌"],"en":["table"],"attrs":["wood"]}
+

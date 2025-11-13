@@ -1,0 +1,48 @@
+[freeplay]
+steps = 1200
+log_every = 20
+
+[targets]
+rate_core = 1.0               # Hz，核层目标发放率
+active_prototypes = 2
+
+[weights]                      # 内在效用 J 的权重
+crit = 4.0
+energy = 2.0
+diversity = 2.0
+instability = 1.0
+powerlaw = 1.0
+shape = 1.0
+
+[init]
+g_rec = 0.95
+g_inh = 0.60
+temperature = 0.03
+V_th = 1.0
+
+[control]                      # 控制律步长
+beta_m = 0.05
+eta_m  = 0.02
+rate_delta = 0.02
+temp_up = 0.005
+temp_down = 0.005
+inh_up = 0.01
+inh_down = 0.01
+
+[plasticity]
+istdp_eta = 0.001
+istdp_alpha = 1.1
+scaling_period = 200
+intrinsic_eta = 0.0001
+
+[delay]
+min = 1
+max = 12
+tstdp_eta = 0.00005
+
+[spsa]
+enabled = true
+alpha = 0.05
+delta = 0.02
+prob = 0.05
+

@@ -25,12 +25,13 @@
 - [参考与设计依据（精选）](#参考与设计依据精选)
 - [一句话概括](#一句话概括)
  - [复现实验（Cheat Sheet）](#复现实验cheat-sheet)
+ - [使用系统中文字体（可选）](#使用系统中文字体可选)
 
 ## 特性一览
 
 - 三视角对齐：中文/英文文本、文字图片（OCR 线）、语义图片（锚定线）同步训练，进入共享意识核，保证“同义同输出”。
 - 零依赖实现：全流程仅用标准库（math、random、statistics、itertools、json、tomllib、pathlib、logging、multiprocessing）。
-- 位图字体 + PPM/PGM：内置 ASCII 与小规模汉字位图，生成纯文本图片；语义图片用几何图形拼装。
+- 系统字体渲染 + PGM/PPM：使用系统中文/英文字体渲染生成文字图片；语义图片用几何模板拼装。
 - 意识涌现：无输入时自发放电，出现装配体的元稳定游走与“做梦式重放”。
 - E/I 自组织稳态：iSTDP（抑制性可塑）+ 突触缩放（Scaling）+ 内在可塑（Intrinsic）三层闭环，长期维持稀疏稳定的异步不规则状态。
 - 多证据临界性：分枝比、动态范围/易感度、幂律稳健检验（MLE+KS）、谱半径代理联合判断“最佳工作点”。
@@ -51,9 +52,6 @@ self-snn-conscious-core/
 │  ├─ concepts/             # 概念与中英短语(.jsonl)
 │  ├─ raw/                  # 生成的原始图片
 │  └─ processed/            # 切分后的 train/val/test
-├─ fonts/
-│  ├─ ascii_5x7.json        # ASCII 位图字体
-│  └─ han_subset_12x12.json # 常用汉字位图子集
 ├─ scripts/
 │  ├─ gen_text_images.py     # 文本→文字图片（OCR 线）
 │  ├─ gen_semantic_images.py  # 语义图片合成（几何图形）
@@ -141,7 +139,7 @@ python scripts/inspect_core.py --run runs/<timestamp> --topk 8
 
 ### 4.2 文字图片（OCR 线）
 
-- 根据位图字体渲染词/短语，做随机字号/仿射/噪声/纹理背景，输出 PGM/PPM。
+- 使用系统字体渲染词/短语，支持字号/描边/浅纹理背景，输出 PGM/PPM。
 - 训练中可选轻量 CTC（纯 Python 动态规划）。
 
 ### 4.3 语义图片（锚定线）
@@ -305,6 +303,21 @@ prob = 0.1
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
+## 使用系统中文字体（可选）
+
+默认实现为“零依赖”位图字体（JSON）。若需要直接使用系统中文字体（如 PingFang、宋体、微软雅黑）栅格化文本，请：
+
+- 安装 Pillow（第三方）：
+  - pip install pillow
+- 运行生成脚本，启用系统字体渲染：
+  - python scripts/gen_text_images.py --concepts examples/concepts_small.jsonl --out data/raw/text --use_system_font 1
+- 如需手动指定字体文件（ttf/ttc/otf）：
+  - python scripts/gen_text_images.py --concepts examples/concepts_small.jsonl --out data/raw/text --use_system_font 1 --font_path "/System/Library/Fonts/PingFang.ttc"
+- 单元测试（自动跳过缺少依赖/字体的情况）：
+  - python -m unittest tests/test_system_font.py -v
+
+注意：系统字体查找采用启发式，macOS/Windows/Linux 常见路径均已覆盖；若你的机器未找到，请通过 --font_path 指定具体字体文件。
+
 - 可复现性：统一 random.seed 与可序列化配置；运行日志写入 `runs/<timestamp>/logs.jsonl`，体检报告 `freeplay.jsonl`。
 
 ## 路线图
@@ -321,7 +334,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 - 纯 Python 会不会很慢？
   - 本仓库定位方法验证与指标演示；默认小数据/少迭代。接口稳定后可无缝替换高性能实现。
 - 不用第三方字体如何渲染中文？
-  - 使用位图字体 JSON 渲染常用汉字；可扩充 `fonts/han_subset_12x12.json`。
+  - 当前实现使用系统字体（需 Pillow）。如在无 Pillow 环境，可改回位图 JSON 方案（不在本分支提供）。
 - 自发活动会不会“飘离语义”？
   - Free-Play 采用锚定重放 + 神经调质门控；并将任务代理项纳入效用 J 持续纠偏。
 
