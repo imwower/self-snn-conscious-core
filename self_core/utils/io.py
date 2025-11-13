@@ -133,3 +133,26 @@ def load_pgm_ppm_to_gray_vec(path: Path) -> List[float]:
         else:
             raise ValueError("Unknown image magic")
 
+
+def load_image_any_to_gray_vec(path: Path) -> List[float]:
+    """载入任意常见图像为灰度向量（0..1）。
+    优先解析 PGM/PPM；若不是，则使用 Pillow 打开（需安装 Pillow）。
+    """
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(2)
+            f.seek(0)
+            if magic in (b"P5", b"P6"):
+                return load_pgm_ppm_to_gray_vec(path)
+    except FileNotFoundError:
+        raise
+    except Exception:
+        pass
+    try:
+        from PIL import Image  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Pillow is required to load non-PGM/PPM images.") from e
+    with Image.open(path) as im:
+        im = im.convert("L")
+        data = list(im.getdata())
+        return [px / 255.0 for px in data]

@@ -21,10 +21,9 @@ from pathlib import Path
 from typing import List, Dict
 
 from self_core.utils.io import get_logger, new_run_dir, read_config, write_jsonl, ensure_dir
-from self_core.encoding.vision_draw import load_image_to_vec
 from self_core.encoding.system_font import render_text_to_bitmap, find_chinese_font
-from self_core.core.conscious_core import ConsciousCore
-from self_core.losses.contrastive import info_nce_loss, cosine_sim, l2, center_loss, avg_rate_penalty, sparsity_penalty
+# 不再需要核心模块（仅中英对齐）
+from self_core.losses.contrastive import info_nce_loss, cosine_sim, l2, center_loss
 
 
 def load_triples(path: Path) -> List[Dict]:
@@ -106,7 +105,6 @@ def main():
 
     D = int(cfg["core"]["dim"])
     in_text = 256
-    in_img = 256
 
     def rand_mat(m, n):
         scale = 1.0 / math.sqrt(m)
@@ -114,14 +112,9 @@ def main():
 
     W_zh = rand_mat(in_text, D)
     W_en = rand_mat(in_text, D)
-    W_img_text = rand_mat(in_img, D)
-    W_img_sem = rand_mat(in_img, D)
     V_zh = rand_mat(in_text, D)
     V_en = rand_mat(in_text, D)
-    V_img_text = rand_mat(in_img, D)
-    V_img_sem = rand_mat(in_img, D)
-
-    core = ConsciousCore(dim=D, prototypes=int(cfg["core"]["prototypes"]))
+    # 仅中英训练，不使用图像流与核心模块
 
     steps_per_epoch = int(cfg["train"].get("steps_per_epoch", 80))
     epochs = int(cfg["train"]["epochs"])
@@ -149,8 +142,7 @@ def main():
             batch = next(bgen)
             zh_vecs: List[List[float]] = []
             en_vecs: List[List[float]] = []
-            it_vecs: List[List[float]] = []
-            is_vecs: List[List[float]] = []
+            # 去掉图像分支
             def gray_bitmap_to_vec(bm: List[List[int]]) -> List[float]:
                 # 将 0..255 灰度二维数组拉平成 0..1 向量
                 out: List[float] = []
@@ -164,40 +156,23 @@ def main():
                 en_bm = render_text_to_bitmap(rec["en"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
                 zh_vecs.append(vec_reduce(gray_bitmap_to_vec(zh_bm)))
                 en_vecs.append(vec_reduce(gray_bitmap_to_vec(en_bm)))
-                it_path = Path(rec["img_text"])  # 文字图片
-                if it_path.exists():
-                    it_vecs.append(vec_reduce(load_image_to_vec(it_path)))
-                else:
-                    # 若缺失，则用系统字体重新渲染英文短语近似替代
-                    it_bm = render_text_to_bitmap(rec["en"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-                    it_vecs.append(vec_reduce(gray_bitmap_to_vec(it_bm)))
-                is_vecs.append(vec_reduce(load_image_to_vec(Path(rec["img_sem"]))))
+                # 不再读取图片
 
             z_zh = [normalize(project(v, W_zh)) for v in zh_vecs]
             z_en = [normalize(project(v, W_en)) for v in en_vecs]
-            z_it = [normalize(project(v, W_img_text)) for v in it_vecs]
-            z_is = [normalize(project(v, W_img_sem)) for v in is_vecs]
-
-            core_out = core.forward_batch(z_is)
+            # 不再使用图像嵌入
 
             w_align = float(cfg["loss"]["align_weight"])  # noqa: F841
             w_agree = float(cfg["loss"]["agree_weight"])  # noqa: F841
             w_center = float(cfg["loss"]["center_weight"])  # noqa: F841
-            w_sparse = float(cfg["loss"]["sparse_weight"])  # noqa: F841
-            w_rate = float(cfg["loss"]["rate_weight"])  # noqa: F841
-
-            loss_align = info_nce_loss(z_zh, z_is, temperature=temp) \
-                       + info_nce_loss(z_en, z_is, temperature=temp) \
-                       + info_nce_loss(z_zh, z_en, temperature=temp)
+            loss_align = info_nce_loss(z_zh, z_en, temperature=temp)
             loss_agree = sum(l2(a, b) for a, b in zip(z_zh, z_en)) / max(1, len(z_zh))
             center = [0.0 for _ in range(D)]
-            for v in (z_zh + z_en + z_it + z_is):
+            for v in (z_zh + z_en):
                 for i in range(D):
                     center[i] += v[i]
-            center = [x / max(1, len(z_zh) * 4) for x in center]
-            loss_center = center_loss(z_zh + z_en + z_it + z_is, center)
-            loss_sparse = sparsity_penalty(core_out["sparse_codes"])  # noqa: F841
-            loss_rate = avg_rate_penalty(core_out["rates"], target=1.0)  # noqa: F841
+            center = [x / max(1, len(z_zh) * 2) for x in center]
+            loss_center = center_loss(z_zh + z_en, center)
 
             # 简化：只对 zh<->is, en<->is 正样做梯度近似
             def grad_cos(u: List[float], v: List[float]) -> List[float]:
@@ -206,27 +181,20 @@ def main():
 
             G_zh = [[0.0 for _ in range(D)] for _ in range(in_text)]
             G_en = [[0.0 for _ in range(D)] for _ in range(in_text)]
-            G_is = [[0.0 for _ in range(D)] for _ in range(in_img)]
 
             for i in range(len(batch)):
-                gz = grad_cos(z_zh[i], z_is[i])
-                ge = grad_cos(z_en[i], z_is[i])
+                gz = grad_cos(z_zh[i], z_en[i])
+                ge = grad_cos(z_en[i], z_zh[i])
                 # x ⊗ dz
                 oz = outer(zh_vecs[i], gz)
                 oe = outer(en_vecs[i], ge)
-                oi = outer(is_vecs[i], [-(g) for g in gz])
-                oi2 = outer(is_vecs[i], [-(g) for g in ge])
                 for r in range(in_text):
                     for c in range(D):
                         G_zh[r][c] += oz[r][c]
                         G_en[r][c] += oe[r][c]
-                for r in range(in_img):
-                    for c in range(D):
-                        G_is[r][c] += (oi[r][c] + oi2[r][c]) * 0.5
 
             apply_update(W_zh, G_zh, lr=float(cfg["train"]["lr"]), mom=float(cfg["train"]["momentum"]), V=V_zh)
             apply_update(W_en, G_en, lr=float(cfg["train"]["lr"]), mom=float(cfg["train"]["momentum"]), V=V_en)
-            apply_update(W_img_sem, G_is, lr=float(cfg["train"]["lr"]), mom=float(cfg["train"]["momentum"]), V=V_img_sem)
 
             step += 1
             if step % log_every == 0:
@@ -238,26 +206,23 @@ def main():
                     "loss_align": float(loss_align),
                     "loss_agree": float(loss_agree),
                     "loss_center": float(loss_center),
-                    "loss_sparse": float(loss_sparse),
-                    "loss_rate": float(loss_rate),
-                    "rates": core_out["rates"]
+                    "rates": 0.0
                 })
                 logger.info(f"step={step} loss={loss_align + loss_agree + loss_center:.4f} align={loss_align:.4f}")
 
             if step % eval_every == 0 and val:
                 vrec = random.choice(val)
                 zh_bm = render_text_to_bitmap(vrec["zh"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-                is_vec = vec_reduce(load_image_to_vec(Path(vrec["img_sem"])))
                 zzh = normalize(project(vec_reduce(gray_bitmap_to_vec(zh_bm)), W_zh))
-                zis = normalize(project(is_vec, W_img_sem))
-                cs = cosine_sim(zzh, zis)
-                write_jsonl(logs, {"time": time.time(), "eval": True, "cos_zh_imgsem": cs})
-                logger.info(f"eval cos(zh,img_sem)={cs:.3f}")
+                en_bm = render_text_to_bitmap(vrec["en"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
+                zen = normalize(project(vec_reduce(gray_bitmap_to_vec(en_bm)), W_en))
+                cs = cosine_sim(zzh, zen)
+                write_jsonl(logs, {"time": time.time(), "eval": True, "cos_zh_en": cs})
+                logger.info(f"eval cos(zh,en)={cs:.3f}")
 
         with open(ckpt, "wb") as f:
             pickle.dump({
-                "W_zh": W_zh, "W_en": W_en, "W_img_text": W_img_text, "W_img_sem": W_img_sem,
-                "core": core.state_dict()
+                "W_zh": W_zh, "W_en": W_en
             }, f)
         logger.info(f"checkpoint saved: {ckpt}")
 

@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import List, Dict
 
 from self_core.utils.io import get_logger, read_config, new_run_dir
-from self_core.eval.metrics import retrieval_metrics, clustering_metrics, vp_distance, energy_metrics
-from self_core.encoding.vision_draw import load_image_to_vec
+from self_core.eval.metrics import retrieval_metrics
 from self_core.encoding.system_font import render_text_to_bitmap, find_chinese_font
+import pickle
 
 
 def read_triples(path: Path) -> List[Dict]:
@@ -44,32 +44,48 @@ def main():
         logger.info("no val set, evaluating on train instead")
         val = read_triples(Path(cfg["data"]["train"]))
 
-    imgs = [load_image_to_vec(Path(r["img_sem"])) for r in val]
-    # 文本图视角：若文件缺失，使用系统字体渲染英文短语作为近似
+    # 从 ckpt 读取投影矩阵
+    ckpt = Path(run_dir) / "ckpt.pkl"
+    if not ckpt.exists():
+        logger.info("no checkpoint found for eval")
+        return
+    with open(ckpt, "rb") as f:
+        state = pickle.load(f)
+    W_zh = state.get("W_zh")
+    W_en = state.get("W_en")
+
+    def project(x, W):
+        return [sum(x[k]*W[k][j] for k in range(len(x))) for j in range(len(W[0]))]
+    def normalize(v):
+        import math
+        s = math.sqrt(sum(x*x for x in v)) + 1e-9
+        return [x/s for x in v]
+    def vec_reduce(v, target=256):
+        if len(v) == target:
+            return v[:]
+        out = [0.0 for _ in range(target)]
+        for i, x in enumerate(v):
+            out[i % target] += x
+        s = (sum(x*x for x in out)) ** 0.5 + 1e-9
+        return [x/s for x in out]
     font_path = find_chinese_font()
     def bmp_to_vec(bm):
         return [(255 - v)/255.0 for row in bm for v in row]
-    txts = []
+
+    zh_embs = []
+    en_embs = []
+    labels = []
     for r in val:
-        p = Path(r["img_text"]) 
-        if p.exists():
-            txts.append(load_image_to_vec(p))
-        else:
-            bm = render_text_to_bitmap(r["en"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-            txts.append(bmp_to_vec(bm))
-    labels = [r["id"] for r in val]
+        bm_zh = render_text_to_bitmap(r["zh"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
+        bm_en = render_text_to_bitmap(r["en"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
+        vzh = normalize(project(vec_reduce(bmp_to_vec(bm_zh)), W_zh))
+        ven = normalize(project(vec_reduce(bmp_to_vec(bm_en)), W_en))
+        zh_embs.append(vzh)
+        en_embs.append(ven)
+        labels.append(r["id"])
 
-    ret = retrieval_metrics(txts, imgs, labels, topk=(1, 5))
-    clu = clustering_metrics(imgs, labels)
-    vp = vp_distance([[i % 5 for i in range(10)] for _ in range(5)], [[i % 5 for i in range(10)] for _ in range(5)])
-    eng = energy_metrics([random.randint(10, 50) for _ in range(20)], steps=100)
-
-    out = {
-        "retrieval": ret,
-        "clustering": clu,
-        "vp_distance": vp,
-        "energy": eng
-    }
+    ret = retrieval_metrics(zh_embs, en_embs, labels, topk=(1, 5))
+    out = {"retrieval_zh2en": ret}
     with open(run_dir / "eval.json", "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 
