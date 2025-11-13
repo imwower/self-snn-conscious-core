@@ -142,26 +142,34 @@ def main():
         s = math.sqrt(sum(x*x for x in out)) + 1e-9
         return [x/s for x in out]
 
+    # 文本位图→向量 缓存，避免每步重复渲染/展平/归一化
+    _text_vec_cache: Dict[str, List[float]] = {}
+
+    def _gray_bitmap_to_vec(bm: List[List[int]]) -> List[float]:
+        out: List[float] = []
+        for row in bm:
+            for v in row:
+                out.append((255 - v) / 255.0)
+        return out
+
+    def text_to_vec_cached(text: str) -> List[float]:
+        """将文本渲染为灰度位图并转成归一化后的 256 维向量，带内存缓存。"""
+        if text in _text_vec_cache:
+            return _text_vec_cache[text]
+        bm = render_text_to_bitmap(text, font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
+        v = vec_reduce(_gray_bitmap_to_vec(bm))
+        _text_vec_cache[text] = v
+        return v
+
     step = 0
     for epoch in range(epochs):
         for _ in range(steps_per_epoch):
             batch = next(bgen)
             zh_vecs: List[List[float]] = []
             en_vecs: List[List[float]] = []
-            # 去掉图像分支
-            def gray_bitmap_to_vec(bm: List[List[int]]) -> List[float]:
-                # 将 0..255 灰度二维数组拉平成 0..1 向量
-                out: List[float] = []
-                for row in bm:
-                    for v in row:
-                        out.append((255 - v) / 255.0)  # 黑色更大
-                return out
-
             for rec in batch:
-                zh_bm = render_text_to_bitmap(rec["zh"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-                en_bm = render_text_to_bitmap(rec["en"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-                zh_vecs.append(vec_reduce(gray_bitmap_to_vec(zh_bm)))
-                en_vecs.append(vec_reduce(gray_bitmap_to_vec(en_bm)))
+                zh_vecs.append(text_to_vec_cached(rec["zh"]))
+                en_vecs.append(text_to_vec_cached(rec["en"]))
                 # 不再读取图片
 
             z_zh = [normalize(project(v, W_zh)) for v in zh_vecs]
@@ -218,10 +226,8 @@ def main():
 
             if step % eval_every == 0 and val:
                 vrec = random.choice(val)
-                zh_bm = render_text_to_bitmap(vrec["zh"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-                zzh = normalize(project(vec_reduce(gray_bitmap_to_vec(zh_bm)), W_zh))
-                en_bm = render_text_to_bitmap(vrec["en"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-                zen = normalize(project(vec_reduce(gray_bitmap_to_vec(en_bm)), W_en))
+                zzh = normalize(project(text_to_vec_cached(vrec["zh"]), W_zh))
+                zen = normalize(project(text_to_vec_cached(vrec["en"]), W_en))
                 cs = cosine_sim(zzh, zen)
                 write_jsonl(logs, {"time": time.time(), "eval": True, "cos_zh_en": cs})
                 logger.info(f"eval cos(zh,en)={cs:.3f}")

@@ -75,17 +75,23 @@ def main():
         s = (sum(x*x for x in out)) ** 0.5 + 1e-9
         return [x/s for x in out]
     font_path = find_chinese_font()
-    def bmp_to_vec(bm):
-        return [(255 - v)/255.0 for row in bm for v in row]
+    # 文本→向量缓存
+    _cache = {}
+    def text_to_vec(text: str):
+        v = _cache.get(text)
+        if v is not None:
+            return v
+        bm = render_text_to_bitmap(text, font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
+        vv = [(255 - x)/255.0 for row in bm for x in row]
+        _cache[text] = vv
+        return vv
 
     zh_embs = []
     en_embs = []
     labels = []
     for r in val:
-        bm_zh = render_text_to_bitmap(r["zh"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-        bm_en = render_text_to_bitmap(r["en"], font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
-        vzh = normalize(project(vec_reduce(bmp_to_vec(bm_zh)), W_zh))
-        ven = normalize(project(vec_reduce(bmp_to_vec(bm_en)), W_en))
+        vzh = normalize(project(vec_reduce(text_to_vec(r["zh"])), W_zh))
+        ven = normalize(project(vec_reduce(text_to_vec(r["en"])), W_en))
         zh_embs.append(vzh)
         en_embs.append(ven)
         labels.append(r["id"])
