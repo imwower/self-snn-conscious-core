@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from self_core.utils.io import get_logger, new_run_dir, read_config, write_jsonl, ensure_dir
-from self_core.encoding.system_font import render_text_to_bitmap, find_chinese_font
+from self_core.encoding.system_font import render_text_to_bitmap, find_chinese_font, find_chinese_fonts
 # 不再需要核心模块（仅中英对齐）
 from self_core.losses.contrastive import info_nce_loss, cosine_sim, l2, center_loss
 
@@ -108,18 +108,34 @@ def main():
     font_path = find_chinese_font()
     if not font_path:
         logger.info("No system font found. Please specify a CJK-capable font on this machine.")
+    # 多字体轮换（可选）
+    fonts_cfg = cfg.get("fonts", {})
+    fonts_cycle = bool(fonts_cfg.get("cycle", False))
+    fonts_list = find_chinese_fonts() if fonts_cycle else ([font_path] if font_path else [])
 
     D = int(cfg["core"]["dim"])
+    use_mlp = bool(cfg["core"].get("mlp", False))
+    hidden = int(cfg["core"].get("hidden", 64))
     in_text = 256
 
     def rand_mat(m, n):
         scale = 1.0 / math.sqrt(m)
         return [[(random.random()*2-1)*scale for _ in range(n)] for _ in range(m)]
 
-    W_zh = rand_mat(in_text, D)
-    W_en = rand_mat(in_text, D)
-    V_zh = rand_mat(in_text, D)
-    V_en = rand_mat(in_text, D)
+    if use_mlp:
+        W1_zh = rand_mat(in_text, hidden)
+        W2_zh = rand_mat(hidden, D)
+        W1_en = rand_mat(in_text, hidden)
+        W2_en = rand_mat(hidden, D)
+        V1_zh = rand_mat(in_text, hidden)
+        V2_zh = rand_mat(hidden, D)
+        V1_en = rand_mat(in_text, hidden)
+        V2_en = rand_mat(hidden, D)
+    else:
+        W_zh = rand_mat(in_text, D)
+        W_en = rand_mat(in_text, D)
+        V_zh = rand_mat(in_text, D)
+        V_en = rand_mat(in_text, D)
     # 仅中英训练，不使用图像流与核心模块
 
     steps_per_epoch = int(cfg["train"].get("steps_per_epoch", 80))
@@ -178,13 +194,18 @@ def main():
                 out.append((255 - v) / 255.0)
         return out
 
-    def text_to_vec_cached(text: str) -> List[float]:
+    def text_to_vec_cached(text: str, font: Optional[str], size: int, padding: int, stroke: int, noise: float) -> List[float]:
         """将文本渲染为灰度位图并转成归一化后的 256 维向量，带内存缓存。"""
-        key = f"{text}|{font_path}|28|2|1|0"
+        key = f"{text}|{font}|{size}|{padding}|{stroke}|{noise:.3f}"
         if key in _text_vec_cache:
             return _text_vec_cache[key]
-        bm = render_text_to_bitmap(text, font_path=font_path, size=28, padding=2, stroke_width=1, stroke_fill=0)
+        bm = render_text_to_bitmap(text, font_path=font, size=size, padding=padding, stroke_width=stroke, stroke_fill=0)
         v = vec_reduce(_gray_bitmap_to_vec(bm))
+        if noise > 0.0:
+            # 轻微噪声增广
+            v = [max(0.0, min(1.0, x + (random.random()*2-1)*noise)) for x in v]
+            s = math.sqrt(sum(x*x for x in v)) + 1e-9
+            v = [x/s for x in v]
         _text_vec_cache[key] = v
         # 追加写入持久化缓存
         try:
@@ -261,15 +282,44 @@ def main():
     for epoch in range(epochs):
         for _ in range(steps_per_epoch):
             batch = next(bgen)
+            # 增广参数
+            aug = cfg.get("augment", {})
+            enable_aug = bool(aug.get("enable", False))
+            size_base = int(aug.get("size", 28))
+            size_jitter = int(aug.get("size_jitter", 2))
+            padding_base = int(aug.get("padding", 2))
+            stroke_base = int(aug.get("stroke_width", 1))
+            noise_level = float(aug.get("noise", 0.0))
+
             zh_vecs: List[List[float]] = []
             en_vecs: List[List[float]] = []
             for rec in batch:
-                zh_vecs.append(text_to_vec_cached(rec["zh"]))
-                en_vecs.append(text_to_vec_cached(rec["en"]))
+                fp_use = random.choice(fonts_list) if fonts_list else font_path
+                size_use = size_base + (random.randint(-size_jitter, size_jitter) if enable_aug else 0)
+                size_use = max(10, size_use)
+                stroke_use = max(0, stroke_base + (random.randint(0, 1) if enable_aug else 0))
+                noise_use = noise_level if enable_aug else 0.0
+                zh_vecs.append(text_to_vec_cached(rec["zh"], fp_use, size_use, padding_base, stroke_use, noise_use))
+                en_vecs.append(text_to_vec_cached(rec["en"], fp_use, size_use, padding_base, stroke_use, noise_use))
                 # 不再读取图片
 
-            z_zh = [normalize(project(v, W_zh)) for v in zh_vecs]
-            z_en = [normalize(project(v, W_en)) for v in en_vecs]
+            if use_mlp:
+                # 前向 MLP：h = tanh(W1^T x), z = norm(W2^T h)
+                def forward_mlp(x, W1, W2):
+                    h = [sum(x[k]*W1[k][j] for k in range(len(x))) for j in range(len(W1[0]))]
+                    h = [math.tanh(a) for a in h]
+                    z = [sum(h[k]*W2[k][j] for k in range(len(h))) for j in range(len(W2[0]))]
+                    s = math.sqrt(sum(v*v for v in z)) + 1e-9
+                    return [v/s for v in z], h
+                tmp1 = [forward_mlp(v, W1_zh, W2_zh) for v in zh_vecs]
+                z_zh = [t[0] for t in tmp1]
+                h_zh = [t[1] for t in tmp1]
+                tmp2 = [forward_mlp(v, W1_en, W2_en) for v in en_vecs]
+                z_en = [t[0] for t in tmp2]
+                h_en = [t[1] for t in tmp2]
+            else:
+                z_zh = [normalize(project(v, W_zh)) for v in zh_vecs]
+                z_en = [normalize(project(v, W_en)) for v in en_vecs]
             # 不再使用图像嵌入
 
             w_align = float(cfg["loss"]["align_weight"])  # noqa: F841
@@ -287,24 +337,60 @@ def main():
 
             G_zh = [[0.0 for _ in range(D)] for _ in range(in_text)]
             G_en = [[0.0 for _ in range(D)] for _ in range(in_text)]
-            for i in range(len(batch)):
-                oz = outer(zh_vecs[i], gZ_zh[i])
-                oe = outer(en_vecs[i], gZ_en[i])
-                for r in range(in_text):
-                    for c in range(D):
-                        G_zh[r][c] += oz[r][c]
-                        G_en[r][c] += oe[r][c]
-            # 学习率调度：按步里程碑调整 current_lr
-            if step in lr_milestones and lr_gamma != 1.0:
-                current_lr *= lr_gamma
-                write_jsonl(logs, {"time": time.time(), "schedule": True, "lr": current_lr, "step": step})
-            # 温度调度：按步里程碑调整 temp
-            if step in temp_milestones and temp_gamma != 1.0:
-                temp *= temp_gamma
-                write_jsonl(logs, {"time": time.time(), "schedule": True, "temperature": temp, "step": step})
-
-            apply_update(W_zh, G_zh, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V_zh)
-            apply_update(W_en, G_en, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V_en)
+            if use_mlp:
+                # 反向：W2 += x: h ⊗ gZ；W1 += x: x ⊗ ( (W2*gZ) ⊙ (1 - h^2) )
+                G1_zh = [[0.0 for _ in range(hidden)] for _ in range(in_text)]
+                G2_zh = [[0.0 for _ in range(D)] for _ in range(hidden)]
+                G1_en = [[0.0 for _ in range(hidden)] for _ in range(in_text)]
+                G2_en = [[0.0 for _ in range(D)] for _ in range(hidden)]
+                for i in range(len(batch)):
+                    # W2
+                    oz2 = outer(h_zh[i], gZ_zh[i])
+                    oe2 = outer(h_en[i], gZ_en[i])
+                    for r in range(hidden):
+                        for c in range(D):
+                            G2_zh[r][c] += oz2[r][c]
+                            G2_en[r][c] += oe2[r][c]
+                    # W1
+                    # gH = (W2 * gZ) ⊙ (1 - h^2)
+                    gH_zh = [sum(W2_zh[r][c]*gZ_zh[i][c] for c in range(D)) for r in range(hidden)]
+                    gH_en = [sum(W2_en[r][c]*gZ_en[i][c] for c in range(D)) for r in range(hidden)]
+                    gH_zh = [gH_zh[r] * (1 - h_zh[i][r]*h_zh[i][r]) for r in range(hidden)]
+                    gH_en = [gH_en[r] * (1 - h_en[i][r]*h_en[i][r]) for r in range(hidden)]
+                    oz1 = outer(zh_vecs[i], gH_zh)
+                    oe1 = outer(en_vecs[i], gH_en)
+                    for r in range(in_text):
+                        for c in range(hidden):
+                            G1_zh[r][c] += oz1[r][c]
+                            G1_en[r][c] += oe1[r][c]
+                # 应用更新
+                if step in lr_milestones and lr_gamma != 1.0:
+                    current_lr *= lr_gamma
+                    write_jsonl(logs, {"time": time.time(), "schedule": True, "lr": current_lr, "step": step})
+                if step in temp_milestones and temp_gamma != 1.0:
+                    temp *= temp_gamma
+                    write_jsonl(logs, {"time": time.time(), "schedule": True, "temperature": temp, "step": step})
+                apply_update(W1_zh, G1_zh, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V1_zh)
+                apply_update(W2_zh, G2_zh, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V2_zh)
+                apply_update(W1_en, G1_en, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V1_en)
+                apply_update(W2_en, G2_en, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V2_en)
+            else:
+                for i in range(len(batch)):
+                    oz = outer(zh_vecs[i], gZ_zh[i])
+                    oe = outer(en_vecs[i], gZ_en[i])
+                    for r in range(in_text):
+                        for c in range(D):
+                            G_zh[r][c] += oz[r][c]
+                            G_en[r][c] += oe[r][c]
+                if step in lr_milestones and lr_gamma != 1.0:
+                    current_lr *= lr_gamma
+                    write_jsonl(logs, {"time": time.time(), "schedule": True, "lr": current_lr, "step": step})
+                if step in temp_milestones and temp_gamma != 1.0:
+                    temp *= temp_gamma
+                    write_jsonl(logs, {"time": time.time(), "schedule": True, "temperature": temp, "step": step})
+                apply_update(W_zh, G_zh, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V_zh)
+                apply_update(W_en, G_en, lr=current_lr, mom=float(cfg["train"]["momentum"]), V=V_en)
+            # 非 MLP 分支的更新已在上方完成；此处移除重复更新
 
             step += 1
             if step % log_every == 0:
@@ -324,16 +410,37 @@ def main():
 
             if step % eval_every == 0 and val:
                 vrec = random.choice(val)
-                zzh = normalize(project(text_to_vec_cached(vrec["zh"]), W_zh))
-                zen = normalize(project(text_to_vec_cached(vrec["en"]), W_en))
+                fp_use = random.choice(fonts_list) if fonts_list else font_path
+                size_use = size_base
+                stroke_use = stroke_base
+                if use_mlp:
+                    vz = text_to_vec_cached(vrec["zh"], fp_use, size_use, padding_base, stroke_use, 0.0)
+                    ve = text_to_vec_cached(vrec["en"], fp_use, size_use, padding_base, stroke_use, 0.0)
+                    def fwd_only(x, W1, W2):
+                        h = [sum(x[k]*W1[k][j] for k in range(len(x))) for j in range(len(W1[0]))]
+                        h = [math.tanh(a) for a in h]
+                        z = [sum(h[k]*W2[k][j] for k in range(len(h))) for j in range(len(W2[0]))]
+                        s = math.sqrt(sum(v*v for v in z)) + 1e-9
+                        return [v/s for v in z]
+                    zzh = fwd_only(vz, W1_zh, W2_zh)
+                    zen = fwd_only(ve, W1_en, W2_en)
+                else:
+                    zzh = normalize(project(text_to_vec_cached(vrec["zh"], fp_use, size_base, padding_base, stroke_base, 0.0), W_zh))
+                    zen = normalize(project(text_to_vec_cached(vrec["en"], fp_use, size_base, padding_base, stroke_base, 0.0), W_en))
                 cs = cosine_sim(zzh, zen)
                 write_jsonl(logs, {"time": time.time(), "eval": True, "cos_zh_en": cs})
                 logger.info(f"eval cos(zh,en)={cs:.3f}")
 
         with open(ckpt, "wb") as f:
-            pickle.dump({
-                "W_zh": W_zh, "W_en": W_en
-            }, f)
+            if use_mlp:
+                pickle.dump({
+                    "W1_zh": W1_zh, "W2_zh": W2_zh,
+                    "W1_en": W1_en, "W2_en": W2_en
+                }, f)
+            else:
+                pickle.dump({
+                    "W_zh": W_zh, "W_en": W_en
+                }, f)
         logger.info(f"checkpoint saved: {ckpt}")
 
     logger.info("train done")

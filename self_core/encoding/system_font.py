@@ -58,6 +58,48 @@ def find_chinese_font() -> Optional[str]:
             return p
     return None
 
+def find_chinese_fonts(max_count: int = 8) -> List[str]:
+    """返回可用的中文/支持中文的系统字体列表（最多 max_count 个）。"""
+    found: List[str] = []
+    candidates = []
+    if os.name == "posix":
+        candidates += [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB W3.otf",
+            "/System/Library/Fonts/Hiragino Sans GB W6.otf",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/Library/Fonts/华文黑体.ttf",
+            "/Library/Fonts/Songti.ttc",
+            "/System/Library/Fonts/Helvetica.ttc",
+        ]
+        candidates += [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+    else:
+        windir = os.environ.get("WINDIR", r"C:\\Windows")
+        candidates += [
+            os.path.join(windir, "Fonts", "simsun.ttc"),
+            os.path.join(windir, "Fonts", "simhei.ttf"),
+            os.path.join(windir, "Fonts", "msyh.ttc"),
+            os.path.join(windir, "Fonts", "arial.ttf"),
+        ]
+    seen = set()
+    for p in candidates:
+        if os.path.exists(p) and p not in seen:
+            found.append(p)
+            seen.add(p)
+            if len(found) >= max_count:
+                break
+    # 至少返回一个
+    if not found:
+        fp = find_chinese_font()
+        if fp:
+            found.append(fp)
+    return found
+
 
 def render_text_to_bitmap(text: str, font_path: Optional[str] = None, size: int = 28, padding: int = 4, stroke_width: int = 0, stroke_fill: int = 0) -> List[List[int]]:
     """

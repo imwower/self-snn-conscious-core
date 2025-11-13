@@ -57,11 +57,29 @@ def main():
         return
     with open(ckpt, "rb") as f:
         state = pickle.load(f)
+    # 支持一层或两层 MLP
     W_zh = state.get("W_zh")
     W_en = state.get("W_en")
+    W1_zh = state.get("W1_zh")
+    W2_zh = state.get("W2_zh")
+    W1_en = state.get("W1_en")
+    W2_en = state.get("W2_en")
+    use_mlp = W1_zh is not None and W2_zh is not None and W1_en is not None and W2_en is not None
 
-    def project(x, W):
+    def project_linear(x, W):
         return [sum(x[k]*W[k][j] for k in range(len(x))) for j in range(len(W[0]))]
+    def tanh(v):
+        import math
+        return [math.tanh(x) for x in v]
+    def project_mlp(x, W1, W2):
+        h = [sum(x[k]*W1[k][j] for k in range(len(x))) for j in range(len(W1[0]))]
+        h = tanh(h)
+        return [sum(h[k]*W2[k][j] for k in range(len(h))) for j in range(len(W2[0]))]
+    def project_any(x):
+        if use_mlp:
+            return project_mlp(x, W1_zh, W2_zh)  # zh 与 en 维度相同；在调用处将按相应矩阵
+        else:
+            return project_linear(x, W_zh)       # 同上
     def normalize(v):
         import math
         s = math.sqrt(sum(x*x for x in v)) + 1e-9
@@ -115,14 +133,59 @@ def main():
     en_embs = []
     labels = []
     for r in val:
-        vzh = normalize(project(vec_reduce(text_to_vec(r["zh"])), W_zh))
-        ven = normalize(project(vec_reduce(text_to_vec(r["en"])), W_en))
+        vzh_in = vec_reduce(text_to_vec(r["zh"]))
+        ven_in = vec_reduce(text_to_vec(r["en"]))
+        if use_mlp:
+            vzh = normalize(project_mlp(vzh_in, W1_zh, W2_zh))
+            ven = normalize(project_mlp(ven_in, W1_en, W2_en))
+        else:
+            vzh = normalize(project_linear(vzh_in, W_zh))
+            ven = normalize(project_linear(ven_in, W_en))
         zh_embs.append(vzh)
         en_embs.append(ven)
         labels.append(r["id"])
 
-    ret = retrieval_metrics(zh_embs, en_embs, labels, topk=(1, 5))
-    out = {"retrieval_zh2en": ret}
+    # 计算 zh→en 与 en→zh 检索，以及对称平均
+    ret_zh2en = retrieval_metrics(zh_embs, en_embs, labels, topk=(1, 5))
+    ret_en2zh = retrieval_metrics(en_embs, zh_embs, labels, topk=(1, 5))
+    avg = {
+        "R@1": (ret_zh2en["R@1"] + ret_en2zh["R@1"]) / 2.0,
+        "R@5": (ret_zh2en["R@5"] + ret_en2zh["R@5"]) / 2.0,
+        "mAP": (ret_zh2en["mAP"] + ret_en2zh["mAP"]) / 2.0,
+    }
+
+    # 诊断：正样平均余弦、最难负样本（行最大非对角）
+    from self_core.eval.metrics import cosine
+    n = min(len(zh_embs), len(en_embs))
+    pos = []
+    hard = []
+    for i in range(n):
+        sims = [cosine(zh_embs[i], en_embs[j]) for j in range(n)]
+        pos.append(sims[i])
+        hard.append(max(s for j, s in enumerate(sims) if j != i) if n > 1 else sims[i])
+    pos_mean_zh2en = sum(pos)/max(1, len(pos))
+    hard_mean_zh2en = sum(hard)/max(1, len(hard))
+    # en→zh 同理
+    pos2 = []
+    hard2 = []
+    for j in range(n):
+        sims = [cosine(en_embs[j], zh_embs[i]) for i in range(n)]
+        pos2.append(sims[j])
+        hard2.append(max(s for i, s in enumerate(sims) if i != j) if n > 1 else sims[j])
+    pos_mean_en2zh = sum(pos2)/max(1, len(pos2))
+    hard_mean_en2zh = sum(hard2)/max(1, len(hard2))
+
+    out = {
+        "retrieval_zh2en": ret_zh2en,
+        "retrieval_en2zh": ret_en2zh,
+        "retrieval_avg": avg,
+        "diagnostics": {
+            "pos_mean_zh2en": pos_mean_zh2en,
+            "hardneg_mean_zh2en": hard_mean_zh2en,
+            "pos_mean_en2zh": pos_mean_en2zh,
+            "hardneg_mean_en2zh": hard_mean_en2zh
+        }
+    }
     with open(run_dir / "eval.json", "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 

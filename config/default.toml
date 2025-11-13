@@ -8,6 +8,8 @@ test  = "data/processed/test/triples.jsonl"
 
 [core]
 dim = 48
+mlp = false
+hidden = 64
 
 [loss]
 align_weight = 1.0
@@ -31,3 +33,14 @@ lr_milestones = []
 lr_gamma = 0.5
 temp_milestones = []
 temp_gamma = 0.9
+
+[augment]
+enable = false
+size = 28
+size_jitter = 2
+padding = 2
+stroke_width = 1
+noise = 0.0
+
+[fonts]
+cycle = false
