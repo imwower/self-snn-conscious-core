@@ -1,5 +1,7 @@
 # self-snn-conscious-core
 
+[English README](README_EN.md)
+
 目标：在“中文/英文文本 ↔ 文字图片（OCR 风格） ↔ 语义图片”三视角上，学习一个共享语义空间（意识核）。让不同输入形式但语义相同的样本在原型空间形成同一装配体（原型簇），并输出一致。
 
 扩展：无外部输入时，意识核可自发产生脉冲（Free-Play/Sleep），并通过多证据闭环自调至最佳工作区（近临界、低能耗、表征丰富且稳定）。
@@ -22,6 +24,7 @@
 - [常见问题（FAQ）](#常见问题faq)
 - [参考与设计依据（精选）](#参考与设计依据精选)
 - [一句话概括](#一句话概括)
+ - [复现实验（Cheat Sheet）](#复现实验cheat-sheet)
 
 ## 特性一览
 
@@ -340,3 +343,34 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ## 一句话概括
 
 一个零依赖、可复现、教学与研究取向的 SNN 意识核脚手架：既能把多模态语义对齐，也能在“无人看管”时自己放电、自己做梦、自己调参，并用多证据证明它工作在“既不爆、也不塌”的最佳区间。
+
+## 复现实验（Cheat Sheet）
+
+```sh
+# 统一时间戳用于 run 路径
+TS=$(date "+%Y-%m-%d_%H-%M-%S")
+
+# 数据构建
+python scripts/gen_text_images.py --concepts examples/concepts_small.jsonl --out data/raw/text
+python scripts/gen_semantic_images.py --concepts examples/concepts_small.jsonl --out data/raw/semantic
+python scripts/build_dataset.py --in data/raw --out data/processed --val_ratio 0.1 --test_ratio 0.1
+
+# 训练 + 评测
+python scripts/train.py --config config/default.toml --run runs/$TS
+python scripts/eval.py  --run runs/$TS
+
+# 可解释性
+python scripts/inspect_core.py --run runs/$TS --topk 8
+
+# 自发活动 + 体检
+python scripts/run_freeplay.py     --config config/emergence.toml --run runs/$TS
+python scripts/analyze_freeplay.py runs/$TS
+
+# 临界性/谱半径/EI 探针
+python scripts/crit_test.py        --run runs/$TS
+python scripts/eig_monitor.py      --run runs/$TS
+python scripts/eibalance_probe.py  --run runs/$TS
+
+# 单元测试
+python -m unittest discover -s tests -p "test_*.py" -v
+```
