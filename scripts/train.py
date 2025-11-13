@@ -19,7 +19,7 @@ import random
 import time
 from pathlib import Path
 import sys
-from typing import List, Dict
+from typing import List, Dict, Optional
 
  # 兼容直接以 `python scripts/train.py` 运行：把仓库根目录加入 sys.path（导入 self_core）
 ROOT = Path(__file__).resolve().parents[1]
@@ -168,6 +168,7 @@ def main():
 
     # 文本位图→向量 缓存，避免每步重复渲染/展平/归一化
     _text_vec_cache: Dict[str, List[float]] = {}
+    _bm_cache: Dict[str, List[List[int]]] = {}
     # 持久化缓存（JSONL）：data/processed/text_cache.jsonl
     cache_file = Path("data/processed/text_cache.jsonl")
     if cache_file.exists():
@@ -194,26 +195,77 @@ def main():
                 out.append((255 - v) / 255.0)
         return out
 
-    def text_to_vec_cached(text: str, font: Optional[str], size: int, padding: int, stroke: int, noise: float) -> List[float]:
-        """将文本渲染为灰度位图并转成归一化后的 256 维向量，带内存缓存。"""
-        key = f"{text}|{font}|{size}|{padding}|{stroke}|{noise:.3f}"
-        if key in _text_vec_cache:
-            return _text_vec_cache[key]
-        bm = render_text_to_bitmap(text, font_path=font, size=size, padding=padding, stroke_width=stroke, stroke_fill=0)
-        v = vec_reduce(_gray_bitmap_to_vec(bm))
+    def _shift_bitmap(bm: List[List[int]], dx: int, dy: int, fill: int = 255) -> List[List[int]]:
+        h = len(bm); w = len(bm[0]) if h else 0
+        if h == 0 or w == 0:
+            return bm
+        out = [[fill for _ in range(w)] for _ in range(h)]
+        for y in range(h):
+            for x in range(w):
+                xx = x - dx
+                yy = y - dy
+                if 0 <= xx < w and 0 <= yy < h:
+                    out[y][x] = bm[yy][xx]
+        return out
+
+    def _crop_pad_bitmap(bm: List[List[int]], top: int, bottom: int, left: int, right: int, fill: int = 255) -> List[List[int]]:
+        h = len(bm); w = len(bm[0]) if h else 0
+        if h == 0 or w == 0:
+            return bm
+        y0 = min(h-1, max(0, top))
+        y1 = max(0, min(h, h - bottom))
+        x0 = min(w-1, max(0, left))
+        x1 = max(0, min(w, w - right))
+        if y0 >= y1 or x0 >= x1:
+            return bm
+        crop = [row[x0:x1] for row in bm[y0:y1]]
+        hh = len(crop); ww = len(crop[0]) if hh else 0
+        out = [[fill for _ in range(w)] for _ in range(h)]
+        if hh == 0 or ww == 0:
+            return out
+        oy = 0 if h == hh else random.randint(0, h - hh)
+        ox = 0 if w == ww else random.randint(0, w - ww)
+        for y in range(hh):
+            for x in range(ww):
+                out[oy + y][ox + x] = crop[y][x]
+        return out
+
+    def text_to_vec_cached(text: str, font: Optional[str], size: int, padding: int, stroke: int, noise: float, shift_max: int = 0, crop_max: int = 0, enable_aug: bool = False) -> List[float]:
+        """将文本渲染为灰度位图并转成归一化后的 256 维向量，带内存缓存与轻量增广（位移/裁剪/噪声）。
+        - 持久化缓存仅保存无增广版本（便于复用）。
+        """
+        base_key = f"{text}|{font}|{size}|{padding}|{stroke}"
+        bm = _bm_cache.get(base_key)
+        if bm is None:
+            bm = render_text_to_bitmap(text, font_path=font, size=size, padding=padding, stroke_width=stroke, stroke_fill=0)
+            _bm_cache[base_key] = bm
+        bm_aug = bm
+        if enable_aug:
+            if shift_max > 0:
+                dx = random.randint(-shift_max, shift_max)
+                dy = random.randint(-shift_max, shift_max)
+                bm_aug = _shift_bitmap(bm_aug, dx, dy)
+            if crop_max > 0:
+                top = random.randint(0, crop_max)
+                bottom = random.randint(0, crop_max)
+                left = random.randint(0, crop_max)
+                right = random.randint(0, crop_max)
+                bm_aug = _crop_pad_bitmap(bm_aug, top, bottom, left, right)
+        v = vec_reduce(_gray_bitmap_to_vec(bm_aug))
         if noise > 0.0:
-            # 轻微噪声增广
             v = [max(0.0, min(1.0, x + (random.random()*2-1)*noise)) for x in v]
             s = math.sqrt(sum(x*x for x in v)) + 1e-9
             v = [x/s for x in v]
-        _text_vec_cache[key] = v
-        # 追加写入持久化缓存
-        try:
-            ensure_dir(cache_file.parent)
-            with open(cache_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"key": key, "vec": v}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        # 持久化仅保存无增广版本，便于 eval 命中
+        if not enable_aug and noise == 0.0:
+            if base_key not in _text_vec_cache:
+                _text_vec_cache[base_key] = v
+                try:
+                    ensure_dir(cache_file.parent)
+                    with open(cache_file, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"key": base_key, "vec": v}, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
         return v
 
     def info_nce_sym_grads(A: List[List[float]], B: List[List[float]], temperature: float) -> (List[List[float]], List[List[float]], float):
@@ -290,17 +342,35 @@ def main():
             padding_base = int(aug.get("padding", 2))
             stroke_base = int(aug.get("stroke_width", 1))
             noise_level = float(aug.get("noise", 0.0))
+            shift_max = int(aug.get("shift", 0))
+            crop_max = int(aug.get("crop", 0))
 
             zh_vecs: List[List[float]] = []
             en_vecs: List[List[float]] = []
             for rec in batch:
-                fp_use = random.choice(fonts_list) if fonts_list else font_path
+                # 多字体按权重采样
+                if fonts_list:
+                    weights = fonts_cfg.get("weights", [])
+                    if not isinstance(weights, list) or len(weights) != len(fonts_list):
+                        fp_use = random.choice(fonts_list)
+                    else:
+                        s = sum(float(w) for w in weights) or 1.0
+                        r = random.random()*s
+                        acc = 0.0
+                        fp_use = fonts_list[-1]
+                        for fpath, w in zip(fonts_list, weights):
+                            acc += float(w)
+                            if r <= acc:
+                                fp_use = fpath
+                                break
+                else:
+                    fp_use = font_path
                 size_use = size_base + (random.randint(-size_jitter, size_jitter) if enable_aug else 0)
                 size_use = max(10, size_use)
                 stroke_use = max(0, stroke_base + (random.randint(0, 1) if enable_aug else 0))
                 noise_use = noise_level if enable_aug else 0.0
-                zh_vecs.append(text_to_vec_cached(rec["zh"], fp_use, size_use, padding_base, stroke_use, noise_use))
-                en_vecs.append(text_to_vec_cached(rec["en"], fp_use, size_use, padding_base, stroke_use, noise_use))
+                zh_vecs.append(text_to_vec_cached(rec["zh"], fp_use, size_use, padding_base, stroke_use, noise_use, shift_max, crop_max, enable_aug))
+                en_vecs.append(text_to_vec_cached(rec["en"], fp_use, size_use, padding_base, stroke_use, noise_use, shift_max, crop_max, enable_aug))
                 # 不再读取图片
 
             if use_mlp:
@@ -393,6 +463,26 @@ def main():
             # 非 MLP 分支的更新已在上方完成；此处移除重复更新
 
             step += 1
+            # 批次诊断：正样平均余弦与最难负样本（双向）
+            def _batch_diag(A: List[List[float]], B: List[List[float]]):
+                if not A or not B:
+                    return 0.0, 0.0
+                n = min(len(A), len(B))
+                def _cos(u, v):
+                    nu = math.sqrt(sum(x*x for x in u)) + 1e-9
+                    nv = math.sqrt(sum(x*x for x in v)) + 1e-9
+                    return sum(x*y for x, y in zip(u, v)) / (nu*nv)
+                pos = []
+                hard = []
+                for i in range(n):
+                    sims = [_cos(A[i], B[j]) for j in range(n)]
+                    pos.append(sims[i])
+                    hard.append(max(s for j, s in enumerate(sims) if j != i) if n > 1 else sims[i])
+                return sum(pos)/max(1, len(pos)), sum(hard)/max(1, len(hard))
+
+            pos1, hard1 = _batch_diag(z_zh, z_en)
+            pos2, hard2 = _batch_diag(z_en, z_zh)
+
             if step % log_every == 0:
                 write_jsonl(logs, {
                     "time": time.time(),
@@ -404,9 +494,13 @@ def main():
                     "loss_center": float(loss_center),
                     "rates": 0.0,
                     "lr": current_lr,
-                    "temperature": temp
+                    "temperature": temp,
+                    "pos_mean_zh2en": pos1,
+                    "hardneg_mean_zh2en": hard1,
+                    "pos_mean_en2zh": pos2,
+                    "hardneg_mean_en2zh": hard2
                 })
-                logger.info(f"step={step} loss={loss_align + loss_agree + loss_center:.4f} align={loss_align:.4f}")
+                logger.info(f"step={step} loss={loss_align + loss_agree + loss_center:.4f} align={loss_align:.4f} pos={pos1:.3f}/{pos2:.3f} hard={hard1:.3f}/{hard2:.3f}")
 
             if step % eval_every == 0 and val:
                 vrec = random.choice(val)

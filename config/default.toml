@@ -41,6 +41,9 @@ size_jitter = 2
 padding = 2
 stroke_width = 1
 noise = 0.0
+shift = 0
+crop = 0
 
 [fonts]
 cycle = false
+weights = []

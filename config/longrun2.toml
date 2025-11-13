@@ -40,6 +40,9 @@ size_jitter = 2
 padding = 2
 stroke_width = 1
 noise = 0.02
+shift = 2
+crop = 1
 
 [fonts]
 cycle = true
+weights = []
